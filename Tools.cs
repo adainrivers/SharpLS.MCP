@@ -246,6 +246,8 @@ public class LspTools
         [Description("Absolute path to the C# file")] string filePath,
         [Description("Name of the symbol to find")] string symbolName,
         [Description("Kind of symbol: class, method, property, field, interface, enum, struct, etc.")] string? symbolKind = null,
+        [Description("Optional regex filter on symbol/file names in results")] string? filter = null,
+        [Description("Max results to return. Default: 50")] int limit = 50,
         CancellationToken ct = default)
     {
         try
@@ -265,7 +267,7 @@ public class LspTools
                 ["position"] = new JObject { ["line"] = pos.Value.line, ["character"] = pos.Value.character },
             }, ct);
 
-            return FormatLocations(result, "implementation");
+            return FormatLocations(result, "implementation", filter, limit);
         }
         catch (Exception ex) { return FormatError(ex); }
     }
@@ -628,6 +630,8 @@ public class LspTools
         [Description("Absolute path to the C# file")] string filePath,
         [Description("Name of the type")] string symbolName,
         [Description("Kind of symbol: class, interface, struct, enum")] string? symbolKind = null,
+        [Description("Optional regex filter on type names in results")] string? filter = null,
+        [Description("Max results to return. Default: 50")] int limit = 50,
         CancellationToken ct = default)
     {
         try
@@ -660,55 +664,106 @@ public class LspTools
                     if (result is JArray types && types.Count > 0)
                     {
                         var sb = new StringBuilder();
-                        sb.AppendLine($"Subtypes of '{symbolName}':");
-                        sb.AppendLine();
-                        FormatTypeHierarchyItems(types, sb);
-                        return sb.ToString().TrimEnd();
+                        var filterRegex = filter is not null ? new System.Text.RegularExpressions.Regex(filter, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
+                        var shown = 0;
+                        var matched = 0;
+                        var total = types.Count;
+
+                        foreach (var t in types)
+                        {
+                            var name = t["name"]?.ToString() ?? "?";
+                            if (filterRegex is not null && !filterRegex.IsMatch(name)) continue;
+                            matched++;
+                            if (shown >= limit) continue;
+                            var kind = LspClient.SymbolKindName(t["kind"]?.Value<int>() ?? 0);
+                            var tUri = t["uri"]?.ToString();
+                            var path = tUri is not null ? LspClient.UriToPath(tUri) : "?";
+                            var range = t["selectionRange"] ?? t["range"];
+                            var line = (range?["start"]?["line"]?.Value<int>() ?? 0) + 1;
+                            sb.AppendLine($"  {name} ({kind}) - {path}:{line}");
+                            shown++;
+                        }
+
+                        if (shown > 0)
+                        {
+                            sb.Insert(0, FormatSubtypesHeader(symbolName, shown, matched, total, filter) + "\n\n");
+                            return sb.ToString().TrimEnd();
+                        }
                     }
                 }
             }
             catch (OperationCanceledException) { throw; }
             catch { /* native LSP failed, use fallback */ }
 
-            return await SubtypesFallback(filePath, symbolName, ct);
+            return await SubtypesFallback(uri, symbolName, pos.Value, filter, limit, ct);
         }
         catch (Exception ex) { return FormatError(ex); }
     }
 
-    private async Task<string> SubtypesFallback(string filePath, string symbolName, CancellationToken ct)
+    private async Task<string> SubtypesFallback(string uri, string symbolName, (int line, int character) pos, string? filter, int limit, CancellationToken ct)
     {
-        // Search the same file for classes/structs inheriting from symbolName
-        var lines = await File.ReadAllLinesAsync(filePath, ct);
-        var pattern = $": {symbolName}";
-        var commaPattern = $", {symbolName}";
-
-        var sb = new StringBuilder();
-        var count = 0;
-
-        for (var i = 0; i < lines.Length; i++)
+        // Use textDocument/references to find where the type is referenced in inheritance declarations
+        var refsResult = await _lsp.RequestAsync("textDocument/references", new JObject
         {
-            var line = lines[i];
-            if (!line.Contains(pattern, StringComparison.Ordinal) &&
-                !line.Contains(commaPattern, StringComparison.Ordinal))
-                continue;
+            ["textDocument"] = new JObject { ["uri"] = uri },
+            ["position"] = new JObject { ["line"] = pos.line, ["character"] = pos.character },
+            ["context"] = new JObject { ["includeDeclaration"] = false },
+        }, ct);
 
-            var trimmed = line.Trim();
-            // Match class/struct/record/interface declarations
+        if (refsResult is not JArray refs || refs.Count == 0)
+            return $"No subtypes found for '{symbolName}'.";
+
+        var filterRegex = filter is not null ? new System.Text.RegularExpressions.Regex(filter, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
+        var sb = new StringBuilder();
+        var shown = 0;
+        var matched = 0;
+        var total = 0;
+        var fileLineCache = new Dictionary<string, string[]>();
+
+        foreach (var r in refs)
+        {
+            var refUri = r["uri"]?.ToString();
+            var refLine = r["range"]?["start"]?["line"]?.Value<int>() ?? -1;
+            if (refUri is null || refLine < 0) continue;
+
+            var refPath = LspClient.UriToPath(refUri);
+            if (!File.Exists(refPath)) continue;
+
+            if (!fileLineCache.TryGetValue(refPath, out var lines))
+                fileLineCache[refPath] = lines = await File.ReadAllLinesAsync(refPath, ct);
+
+            if (refLine >= lines.Length) continue;
+
+            var lineText = lines[refLine].Trim();
+            // Must be a type declaration with inheritance
             var match = System.Text.RegularExpressions.Regex.Match(
-                trimmed, @"(?:class|struct|record|interface)\s+(\w+)");
+                lineText, @"(?:class|struct|record|interface)\s+(\w+)");
             if (!match.Success) continue;
 
             var typeName = match.Groups[1].Value;
-            if (typeName == symbolName) continue; // skip self
+            if (typeName == symbolName) continue;
 
-            sb.AppendLine($"  {typeName} (Class) - {filePath}:{i + 1}");
-            count++;
+            // Verify the reference is in an inheritance context (after : or ,)
+            if (!lineText.Contains($": {symbolName}", StringComparison.Ordinal) &&
+                !lineText.Contains($", {symbolName}", StringComparison.Ordinal) &&
+                !lineText.Contains($".{symbolName}", StringComparison.Ordinal))
+                continue;
+
+            total++;
+            if (filterRegex is not null && !filterRegex.IsMatch(typeName)) continue;
+            matched++;
+            if (shown >= limit) continue;
+
+            var kindWord = match.Value.Split(' ')[0].Trim();
+            var kind = char.ToUpperInvariant(kindWord[0]) + kindWord[1..];
+            sb.AppendLine($"  {typeName} ({kind}) - {refPath}:{refLine + 1}");
+            shown++;
         }
 
-        if (count == 0)
+        if (shown == 0)
             return $"No subtypes found for '{symbolName}'.";
 
-        sb.Insert(0, $"Subtypes of '{symbolName}':\n\n");
+        sb.Insert(0, FormatSubtypesHeader(symbolName, shown, matched, total, filter) + "\n\n");
         return sb.ToString().TrimEnd();
     }
 
@@ -758,7 +813,14 @@ public class LspTools
                 // Take just the first type (base class, not interfaces)
                 var baseType = afterColon
                     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                    .Select(t => t.Split('<')[0].Trim())
+                    .Select(t =>
+                    {
+                        // Strip generic type args: Foo<T> -> Foo
+                        var s = t.Split('<')[0].Trim();
+                        // Strip primary constructor args: Foo(address) -> Foo
+                        var parenIdx = s.IndexOf('(');
+                        return parenIdx >= 0 ? s[..parenIdx].Trim() : s;
+                    })
                     .FirstOrDefault(t => t.Length > 0);
 
                 if (baseType is null || !visited.Add(baseType)) break;
@@ -1024,6 +1086,29 @@ public class LspTools
 
     // -- Error formatting --
 
+    private static string FormatSubtypesHeader(string symbolName, int shown, int matched, int total, string? filter)
+    {
+        // "Subtypes of 'X' (showing 10 of 45 matching '^BP_', 622 total):"
+        var sb = new StringBuilder($"Subtypes of '{symbolName}' (");
+        if (filter is not null)
+        {
+            if (shown < matched)
+                sb.Append($"showing {shown} of {matched} matching '{filter}'");
+            else
+                sb.Append($"{matched} matching '{filter}'");
+            sb.Append($", {total} total");
+        }
+        else
+        {
+            if (shown < total)
+                sb.Append($"showing {shown} of {total}");
+            else
+                sb.Append($"{total}");
+        }
+        sb.Append("):");
+        return sb.ToString();
+    }
+
     private static string FormatError(Exception ex)
     {
         if (ex is OperationCanceledException)
@@ -1073,7 +1158,7 @@ public class LspTools
 
     // -- Formatting helpers --
 
-    private static string FormatLocations(JToken? result, string label)
+    private static string FormatLocations(JToken? result, string label, string? filter = null, int limit = 0)
     {
         if (result is null) return $"No {label} found.";
 
@@ -1091,12 +1176,75 @@ public class LspTools
 
         if (locations.Count == 0) return $"No {label} found.";
 
+        var filterRegex = filter is not null ? new System.Text.RegularExpressions.Regex(filter, System.Text.RegularExpressions.RegexOptions.IgnoreCase) : null;
         var sb = new StringBuilder();
-        sb.AppendLine($"Found {locations.Count} {label}(s):");
+        var shown = 0;
+        var matched = 0;
+        var total = locations.Count;
+        var fileLineCache = new Dictionary<string, string[]>();
+
         foreach (var (path, line, col) in locations)
-            sb.AppendLine($"  {path}:{line}:{col}");
+        {
+            var symbolName = ExtractSymbolNameFromFile(path, line, fileLineCache);
+            var matchTarget = symbolName ?? path;
+            if (filterRegex is not null && !filterRegex.IsMatch(matchTarget)) continue;
+            matched++;
+            if (limit > 0 && shown >= limit) continue;
+
+            if (symbolName is not null)
+                sb.AppendLine($"  {symbolName} - {path}:{line}");
+            else
+                sb.AppendLine($"  {path}:{line}:{col}");
+            shown++;
+        }
+
+        if (shown == 0) return $"No {label} found" + (filter is not null ? $" matching '{filter}'." : ".");
+
+        var header = new StringBuilder($"Found ");
+        if (filter is not null)
+        {
+            if (shown < matched)
+                header.Append($"{shown} of {matched} {label}(s) matching '{filter}'");
+            else
+                header.Append($"{matched} {label}(s) matching '{filter}'");
+            header.Append($" ({total} total)");
+        }
+        else
+        {
+            if (shown < total)
+                header.Append($"{shown} of {total} {label}(s)");
+            else
+                header.Append($"{total} {label}(s)");
+        }
+        sb.Insert(0, header + ":\n\n");
 
         return sb.ToString().TrimEnd();
+    }
+
+    private static string? ExtractSymbolNameFromFile(string path, int line, Dictionary<string, string[]> cache)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+            if (!cache.TryGetValue(path, out var lines))
+                cache[path] = lines = File.ReadAllLines(path);
+
+            if (line - 1 < 0 || line - 1 >= lines.Length) return null;
+            var lineText = lines[line - 1].Trim();
+
+            // Try to extract a type or member name from the declaration
+            var match = System.Text.RegularExpressions.Regex.Match(
+                lineText, @"(?:class|struct|record|interface|enum)\s+(\w+)");
+            if (match.Success) return match.Groups[1].Value;
+
+            // Try method/property pattern
+            match = System.Text.RegularExpressions.Regex.Match(
+                lineText, @"(?:public|private|protected|internal|static|override|virtual|abstract|async)\s+.*?\s+(\w+)\s*[({]");
+            if (match.Success) return match.Groups[1].Value;
+
+            return null;
+        }
+        catch { return null; }
     }
 
     private static void ExtractLocation(JToken item, List<(string path, int line, int col)> locations)
