@@ -200,7 +200,11 @@ public class LspClient : IHostedService, IDisposable
         }
 
         // Fallback: use workspace/symbol for large files where documentSymbol may miss entries
-        return await FindSymbolViaWorkspaceAsync(filePath, symbolName, symbolKind, ct);
+        var wsResult = await FindSymbolViaWorkspaceAsync(filePath, symbolName, symbolKind, ct);
+        if (wsResult is not null) return wsResult;
+
+        // Last resort: text search for symbol usage (needed for cross-file definition/type-definition)
+        return await FindSymbolViaTextSearchAsync(filePath, symbolName, ct);
     }
 
     private async Task<(int line, int character)?> FindSymbolViaWorkspaceAsync(
@@ -240,6 +244,30 @@ public class LspClient : IHostedService, IDisposable
 
         return null;
     }
+
+    private static async Task<(int line, int character)?> FindSymbolViaTextSearchAsync(
+        string filePath, string symbolName, CancellationToken ct)
+    {
+        if (!File.Exists(filePath)) return null;
+
+        var lines = await File.ReadAllLinesAsync(filePath, ct);
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var col = lines[i].IndexOf(symbolName, StringComparison.Ordinal);
+            if (col < 0) continue;
+
+            // Verify it's a whole word match (not a substring of a longer identifier)
+            if (col > 0 && IsIdentifierChar(lines[i][col - 1])) continue;
+            var end = col + symbolName.Length;
+            if (end < lines[i].Length && IsIdentifierChar(lines[i][end])) continue;
+
+            return (i, col);
+        }
+
+        return null;
+    }
+
+    private static bool IsIdentifierChar(char c) => char.IsLetterOrDigit(c) || c == '_';
 
     /// <summary>
     /// Find ALL positions of a symbol in a file (handles overloads/multiple matches).

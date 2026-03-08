@@ -26,6 +26,9 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<LspClient>());
 builder.Services
     .AddMcpServer()
     .WithStdioServerTransport()
-    .WithTools<LspTools>();
+    .WithTools<NavigationTools>()
+    .WithTools<HierarchyTools>()
+    .WithTools<EditTools>()
+    .WithTools<LifecycleTools>();
 
 await builder.Build().RunAsync();
