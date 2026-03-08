@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text;
+using System.Text.RegularExpressions;
 using ModelContextProtocol.Server;
 using Newtonsoft.Json.Linq;
 
@@ -93,93 +94,13 @@ public class EditTools : ToolBase
                 return $"Rename failed - no changes returned.";
 
             var applied = await ApplyWorkspaceEditAsync(result, ct);
-            var summary = FormatWorkspaceEdit(result, symbolName, newName);
+            var summary = FormatRenameEdit(result, symbolName, newName);
             return applied ? summary : $"(dry-run, edits NOT applied to disk)\n\n{summary}";
         }
         catch (Exception ex) { return FormatError(ex); }
     }
 
-    // -- Workspace edit application --
-
-    private async Task<bool> ApplyWorkspaceEditAsync(JToken result, CancellationToken ct)
-    {
-        var fileEdits = new Dictionary<string, List<(int startLine, int startChar, int endLine, int endChar, string newText)>>();
-
-        void CollectEdits(string uri, JArray edits)
-        {
-            var path = LspClient.UriToPath(uri);
-            if (!fileEdits.TryGetValue(path, out var list))
-                fileEdits[path] = list = [];
-
-            foreach (var edit in edits)
-            {
-                var range = edit["range"];
-                if (range is null) continue;
-                list.Add((
-                    range["start"]!["line"]!.Value<int>(),
-                    range["start"]!["character"]!.Value<int>(),
-                    range["end"]!["line"]!.Value<int>(),
-                    range["end"]!["character"]!.Value<int>(),
-                    edit["newText"]?.ToString() ?? ""));
-            }
-        }
-
-        if (result["documentChanges"] is JArray docChanges)
-        {
-            foreach (var dc in docChanges)
-            {
-                var uri = dc["textDocument"]?["uri"]?.ToString();
-                if (uri is not null && dc["edits"] is JArray edits)
-                    CollectEdits(uri, edits);
-            }
-        }
-
-        if (result["changes"] is JObject changes)
-        {
-            foreach (var prop in changes.Properties())
-            {
-                if (prop.Value is JArray edits)
-                    CollectEdits(prop.Name, edits);
-            }
-        }
-
-        if (fileEdits.Count == 0) return false;
-
-        foreach (var (path, edits) in fileEdits)
-        {
-            var text = await File.ReadAllTextAsync(path, ct);
-            var lines = text.Split('\n');
-
-            foreach (var (sl, sc, el, ec, newText) in edits.OrderByDescending(e => e.startLine).ThenByDescending(e => e.startChar))
-            {
-                var startOffset = GetOffset(lines, sl, sc);
-                var endOffset = GetOffset(lines, el, ec);
-                text = string.Concat(text.AsSpan(0, startOffset), newText, text.AsSpan(endOffset));
-                lines = text.Split('\n');
-            }
-
-            await File.WriteAllTextAsync(path, text, ct);
-
-            var uri = LspClient.PathToUri(path);
-            await _lsp.NotifyAsync("textDocument/didClose", new JObject
-            {
-                ["textDocument"] = new JObject { ["uri"] = uri }
-            });
-            _lsp.MarkDocumentClosed(uri);
-        }
-
-        return true;
-    }
-
-    private static int GetOffset(string[] lines, int line, int character)
-    {
-        var offset = 0;
-        for (var i = 0; i < line && i < lines.Length; i++)
-            offset += lines[i].Length + 1;
-        return offset + character;
-    }
-
-    private static string FormatWorkspaceEdit(JToken result, string oldName, string newName)
+    private static string FormatRenameEdit(JToken result, string oldName, string newName)
     {
         var sb = new StringBuilder();
         var totalEdits = 0;
@@ -224,5 +145,168 @@ public class EditTools : ToolBase
 
         sb.Insert(0, $"Rename '{oldName}' -> '{newName}': {totalEdits} edit(s) across {fileCount} file(s):\n\n");
         return sb.ToString().TrimEnd();
+    }
+
+    [McpServerTool(Name = "format_document"), Description("Format a C# file (or a range of lines) using the project's formatting rules.")]
+    public async Task<string> FormatDocument(
+        [Description("Absolute path to the C# file")] string filePath,
+        [Description("Optional start line (1-based) for range formatting")] int? startLine = null,
+        [Description("Optional end line (1-based) for range formatting")] int? endLine = null,
+        [Description("Tab size. Default: 4")] int tabSize = 4,
+        [Description("Use spaces instead of tabs. Default: true")] bool insertSpaces = true,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            var (uri, err) = await PrepareDocumentRequest(filePath, ct);
+            if (uri is null) return err!;
+
+            var options = new JObject
+            {
+                ["tabSize"] = tabSize,
+                ["insertSpaces"] = insertSpaces,
+                ["trimTrailingWhitespace"] = true,
+                ["insertFinalNewline"] = true,
+                ["trimFinalNewlines"] = true,
+            };
+
+            JToken? result;
+            if (startLine is not null)
+            {
+                var sl = startLine.Value - 1;
+                var el = (endLine ?? startLine.Value) - 1;
+                result = await _lsp.RequestAsync("textDocument/rangeFormatting", new JObject
+                {
+                    ["textDocument"] = new JObject { ["uri"] = uri },
+                    ["range"] = new JObject
+                    {
+                        ["start"] = new JObject { ["line"] = sl, ["character"] = 0 },
+                        ["end"] = new JObject { ["line"] = el + 1, ["character"] = 0 },
+                    },
+                    ["options"] = options,
+                }, ct);
+            }
+            else
+            {
+                result = await _lsp.RequestAsync("textDocument/formatting", new JObject
+                {
+                    ["textDocument"] = new JObject { ["uri"] = uri },
+                    ["options"] = options,
+                }, ct);
+            }
+
+            if (result is not JArray edits || edits.Count == 0)
+                return $"No formatting changes needed in {Path.GetFileName(filePath)}.";
+
+            var count = await ApplyTextEditsAsync(filePath, edits, ct);
+            var rangeDesc = startLine is not null
+                ? $" (lines {startLine}-{endLine ?? startLine})"
+                : "";
+            return $"Formatted {Path.GetFileName(filePath)}{rangeDesc}: {count} edit(s) applied.";
+        }
+        catch (Exception ex) { return FormatError(ex); }
+    }
+
+    [McpServerTool(Name = "get_workspace_diagnostics"), Description("Get compiler errors and warnings across the entire workspace/solution.")]
+    public async Task<string> GetWorkspaceDiagnostics(
+        [Description("Optional path filter (case-insensitive). Supports: substring match, wildcards (*\\\\Dune\\\\*.cs), multiple filters separated by ;")] string? pathFilter = null,
+        [Description("Minimum severity: error, warning, info, hint. Default: warning")] string? minSeverity = null,
+        [Description("Max total diagnostics to return. Default: 200")] int limit = 200,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (RequireSolution() is string err) return err;
+
+            var minSev = (minSeverity?.ToLowerInvariant()) switch
+            {
+                "error" => 1,
+                "warning" or null => 2,
+                "info" or "information" => 3,
+                "hint" => 4,
+                _ => 2,
+            };
+
+            var filters = ParsePathFilters(pathFilter);
+
+            JToken? result;
+            try
+            {
+                result = await _lsp.RequestAsync("workspace/diagnostic", new JObject
+                {
+                    ["previousResultIds"] = new JArray(),
+                }, ct);
+            }
+            catch
+            {
+                return "workspace/diagnostic not supported by this server. Use get_diagnostics for individual files.";
+            }
+
+            var items = result?["items"] as JArray;
+            if (items is null || items.Count == 0)
+                return "No workspace diagnostics found.";
+
+            var sb = new StringBuilder();
+            var totalCount = 0;
+            var fileCount = 0;
+
+            foreach (var doc in items)
+            {
+                var kind = doc["kind"]?.ToString();
+                if (kind != "full") continue;
+
+                var docUri = doc["uri"]?.ToString();
+                if (docUri is null) continue;
+
+                var path = LspClient.UriToPath(docUri);
+                if (filters is not null && !MatchesAnyPathFilter(path, filters))
+                    continue;
+
+                var diags = doc["items"] as JArray;
+                if (diags is null || diags.Count == 0) continue;
+
+                var fileDiags = new StringBuilder();
+                var fileDiagCount = 0;
+
+                foreach (var diag in diags)
+                {
+                    if (totalCount >= limit) break;
+
+                    var severity = diag["severity"]?.Value<int>() ?? 4;
+                    if (severity > minSev) continue;
+
+                    var sevLabel = severity switch { 1 => "Error", 2 => "Warning", 3 => "Info", _ => "Hint" };
+                    var line = (diag["range"]?["start"]?["line"]?.Value<int>() ?? 0) + 1;
+                    var code = diag["code"]?.ToString() ?? "";
+                    var message = diag["message"]?.ToString() ?? "";
+
+                    fileDiags.Append($"    [{sevLabel}] :{line}");
+                    if (code.Length > 0) fileDiags.Append($" {code}");
+                    fileDiags.AppendLine($": {message}");
+                    fileDiagCount++;
+                    totalCount++;
+                }
+
+                if (fileDiagCount > 0)
+                {
+                    fileCount++;
+                    sb.AppendLine($"  {path} ({fileDiagCount}):");
+                    sb.Append(fileDiags);
+                }
+
+                if (totalCount >= limit) break;
+            }
+
+            if (totalCount == 0)
+                return $"No workspace diagnostics at severity '{minSeverity ?? "warning"}' or above" +
+                    (pathFilter is not null ? $" matching '{pathFilter}'" : "") + ".";
+
+            var header = $"Found {totalCount} diagnostic(s) across {fileCount} file(s)";
+            if (totalCount >= limit) header += $" (limit: {limit})";
+            if (pathFilter is not null) header += $" (path: '{pathFilter}')";
+            sb.Insert(0, header + ":\n\n");
+            return sb.ToString().TrimEnd();
+        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 }

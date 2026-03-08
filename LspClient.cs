@@ -107,6 +107,51 @@ public class LspClient : IHostedService, IDisposable
                     },
                     ["diagnostic"] = new JObject(),
                     ["publishDiagnostics"] = new JObject(),
+                    ["completion"] = new JObject
+                    {
+                        ["completionItem"] = new JObject
+                        {
+                            ["snippetSupport"] = false,
+                            ["documentationFormat"] = new JArray("markdown", "plaintext"),
+                            ["resolveSupport"] = new JObject
+                            {
+                                ["properties"] = new JArray("documentation", "detail")
+                            }
+                        }
+                    },
+                    ["signatureHelp"] = new JObject
+                    {
+                        ["signatureInformation"] = new JObject
+                        {
+                            ["documentationFormat"] = new JArray("markdown", "plaintext"),
+                            ["parameterInformation"] = new JObject
+                            {
+                                ["labelOffsetSupport"] = true
+                            },
+                            ["activeParameterSupport"] = true
+                        }
+                    },
+                    ["codeAction"] = new JObject
+                    {
+                        ["codeActionLiteralSupport"] = new JObject
+                        {
+                            ["codeActionKind"] = new JObject
+                            {
+                                ["valueSet"] = new JArray(
+                                    "quickfix", "refactor", "refactor.extract",
+                                    "refactor.inline", "refactor.rewrite",
+                                    "source", "source.organizeImports", "source.fixAll")
+                            }
+                        },
+                        ["dataSupport"] = true,
+                        ["resolveSupport"] = new JObject
+                        {
+                            ["properties"] = new JArray("edit")
+                        }
+                    },
+                    ["formatting"] = new JObject(),
+                    ["rangeFormatting"] = new JObject(),
+                    ["inlayHint"] = new JObject(),
                 },
                 ["workspace"] = new JObject
                 {

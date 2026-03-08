@@ -29,6 +29,8 @@ builder.Services
     .WithTools<NavigationTools>()
     .WithTools<HierarchyTools>()
     .WithTools<EditTools>()
+    .WithTools<CodeActionTools>()
+    .WithTools<IntelliSenseTools>()
     .WithTools<LifecycleTools>();
 
 await builder.Build().RunAsync();
