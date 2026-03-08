@@ -20,8 +20,11 @@ public class LspClient : IHostedService, IDisposable
     private Process? _process;
     private JsonRpc? _rpc;
     private readonly HashSet<string> _openDocuments = [];
+    private bool _solutionLoaded;
 
     public int TimeoutMs => _options.TimeoutSeconds * 1000;
+    public bool IsSolutionLoaded => _solutionLoaded;
+    public string? CurrentSolutionPath => _options.SolutionPath;
 
     public LspClient(LspClientOptions options, ILogger<LspClient> logger)
     {
@@ -31,9 +34,11 @@ public class LspClient : IHostedService, IDisposable
 
     public async Task StartAsync(CancellationToken ct)
     {
+        var executable = ResolveExecutable("roslyn-language-server");
+
         var psi = new ProcessStartInfo
         {
-            FileName = "csharp-ls",
+            FileName = executable,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -41,22 +46,19 @@ public class LspClient : IHostedService, IDisposable
             CreateNoWindow = true,
         };
 
-        if (_options.SolutionPath is not null)
-        {
-            psi.ArgumentList.Add("--solution");
-            psi.ArgumentList.Add(_options.SolutionPath);
-        }
-
-        psi.ArgumentList.Add("--loglevel");
-        psi.ArgumentList.Add("warning");
+        psi.ArgumentList.Add("--stdio");
+        if (_options.SolutionPath is null)
+            psi.ArgumentList.Add("--autoLoadProjects");
+        psi.ArgumentList.Add("--logLevel");
+        psi.ArgumentList.Add("Warning");
 
         _process = Process.Start(psi)
-            ?? throw new InvalidOperationException("Failed to start csharp-ls");
+            ?? throw new InvalidOperationException("Failed to start roslyn-language-server");
 
         _process.ErrorDataReceived += (_, e) =>
         {
             if (e.Data is not null)
-                _logger.LogDebug("[csharp-ls] {Line}", e.Data);
+                _logger.LogDebug("[roslyn-ls] {Line}", e.Data);
         };
         _process.BeginErrorReadLine();
 
@@ -73,7 +75,9 @@ public class LspClient : IHostedService, IDisposable
 
     private async Task InitializeLspAsync(CancellationToken ct)
     {
-        var workspaceRoot = _options.WorkspaceRoot ?? Directory.GetCurrentDirectory();
+        var workspaceRoot = _options.WorkspaceRoot
+            ?? (_options.SolutionPath is not null ? Path.GetDirectoryName(_options.SolutionPath)! : null)
+            ?? Directory.GetCurrentDirectory();
         var rootUri = new Uri(workspaceRoot).AbsoluteUri;
 
         var initParams = new JObject
@@ -123,11 +127,17 @@ public class LspClient : IHostedService, IDisposable
         var result = await _rpc!.InvokeWithParameterObjectAsync<JToken>(
             "initialize", initParams, cts.Token);
 
-        _logger.LogInformation("csharp-ls initialized");
+        _logger.LogInformation("roslyn-ls initialized");
 
         await _rpc.NotifyWithParameterObjectAsync("initialized", new JObject());
 
-        _logger.LogInformation("LSP initialized notification sent, solution loading in background...");
+        if (_options.SolutionPath is not null)
+        {
+            await OpenSolutionInternalAsync(_options.SolutionPath);
+        }
+
+        _logger.LogInformation("LSP initialized{Solution}",
+            _solutionLoaded ? $", solution: {_options.SolutionPath}" : ", no solution loaded");
     }
 
     public async Task EnsureDocumentOpenAsync(string filePath, CancellationToken ct = default)
@@ -164,6 +174,11 @@ public class LspClient : IHostedService, IDisposable
         await _rpc!.NotifyWithParameterObjectAsync(method, @params);
     }
 
+    public void MarkDocumentClosed(string uri)
+    {
+        _openDocuments.Remove(uri);
+    }
+
     /// <summary>
     /// Find a symbol's position in a file by searching documentSymbol results.
     /// </summary>
@@ -178,9 +193,52 @@ public class LspClient : IHostedService, IDisposable
             ["textDocument"] = new JObject { ["uri"] = uri }
         }, ct);
 
+        if (result is JArray symbols)
+        {
+            var found = SearchSymbolTree(symbols, symbolName, symbolKind);
+            if (found is not null) return found;
+        }
+
+        // Fallback: use workspace/symbol for large files where documentSymbol may miss entries
+        return await FindSymbolViaWorkspaceAsync(filePath, symbolName, symbolKind, ct);
+    }
+
+    private async Task<(int line, int character)?> FindSymbolViaWorkspaceAsync(
+        string filePath, string symbolName, string? symbolKind = null, CancellationToken ct = default)
+    {
+        var result = await RequestAsync("workspace/symbol", new JObject
+        {
+            ["query"] = symbolName
+        }, ct);
+
         if (result is not JArray symbols) return null;
 
-        return SearchSymbolTree(symbols, symbolName, symbolKind);
+        var fileUri = PathToUri(filePath);
+
+        foreach (var sym in symbols)
+        {
+            var name = sym["name"]?.ToString();
+            if (!string.Equals(name, symbolName, StringComparison.Ordinal))
+                continue;
+
+            var loc = sym["location"];
+            var symUri = loc?["uri"]?.ToString();
+            if (symUri is null || !string.Equals(symUri, fileUri, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (symbolKind is not null)
+            {
+                var symKind = sym["kind"]?.Value<int>() ?? 0;
+                if (!MatchesKind(symKind, symbolKind))
+                    continue;
+            }
+
+            var range = loc?["range"];
+            if (range?["start"] is JToken start)
+                return (start["line"]!.Value<int>(), start["character"]!.Value<int>());
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -321,13 +379,33 @@ public class LspClient : IHostedService, IDisposable
         _ => $"Unknown({kind})",
     };
 
+    private async Task OpenSolutionInternalAsync(string solutionPath)
+    {
+        var solutionUri = new Uri(solutionPath).AbsoluteUri;
+        _logger.LogInformation("Opening solution {Solution}...", solutionPath);
+        await _rpc!.NotifyWithParameterObjectAsync("solution/open", new JObject
+        {
+            ["solution"] = solutionUri,
+        });
+        _solutionLoaded = true;
+    }
+
+    public async Task LoadSolutionAsync(string solutionPath, CancellationToken ct)
+    {
+        _options.SolutionPath = solutionPath;
+        _options.WorkspaceRoot ??= Path.GetDirectoryName(solutionPath);
+        _logger.LogInformation("Loading solution {Solution}, restarting LSP...", solutionPath);
+        await RestartAsync(ct);
+    }
+
     public async Task RestartAsync(CancellationToken ct)
     {
-        _logger.LogInformation("Restarting csharp-ls...");
+        _logger.LogInformation("Restarting roslyn-ls...");
         await StopAsync(ct);
         _openDocuments.Clear();
+        _solutionLoaded = false;
         await StartAsync(ct);
-        _logger.LogInformation("csharp-ls restarted");
+        _logger.LogInformation("roslyn-ls restarted");
     }
 
     public async Task StopAsync(CancellationToken ct)
@@ -349,6 +427,44 @@ public class LspClient : IHostedService, IDisposable
             _process.Kill();
         }
         _process?.Dispose();
+    }
+
+    /// <summary>
+    /// Resolve a dotnet global tool name to its actual executable path.
+    /// Handles .cmd shims on Windows by parsing the target exe from the shim.
+    /// </summary>
+    private static string ResolveExecutable(string toolName)
+    {
+        if (!OperatingSystem.IsWindows())
+            return toolName;
+
+        var toolsDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".dotnet", "tools");
+
+        // Check for direct .exe first
+        var exePath = Path.Combine(toolsDir, toolName + ".exe");
+        if (File.Exists(exePath))
+            return exePath;
+
+        // Parse .cmd shim to find the real exe
+        // Typical format: "%~dp0.store\tool\version\...\Tool.exe" %*
+        var cmdPath = Path.Combine(toolsDir, toolName + ".cmd");
+        if (File.Exists(cmdPath))
+        {
+            foreach (var line in File.ReadLines(cmdPath))
+            {
+                var idx = line.IndexOf(".exe", StringComparison.OrdinalIgnoreCase);
+                if (idx < 0) continue;
+
+                var exePart = line[..( idx + 4)].Trim().TrimStart('@').Trim().Trim('"');
+                var resolved = exePart.Replace("%~dp0", toolsDir + Path.DirectorySeparatorChar);
+                if (File.Exists(resolved))
+                    return resolved;
+            }
+        }
+
+        return toolName;
     }
 
     public void Dispose()

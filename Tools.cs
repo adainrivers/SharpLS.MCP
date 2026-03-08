@@ -13,6 +13,33 @@ public class LspTools
 
     public LspTools(LspClient lsp) => _lsp = lsp;
 
+    [McpServerTool(Name = "load_solution"), Description("Load a solution or project file. Must be called before using any other tool. Accepts .sln, .slnx, or .csproj paths.")]
+    public async Task<string> LoadSolution(
+        [Description("Absolute path to the solution (.sln/.slnx) or project (.csproj) file")] string path,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (!File.Exists(path))
+                return $"File not found: {path}";
+
+            var ext = Path.GetExtension(path).ToLowerInvariant();
+            if (ext is not (".sln" or ".slnx" or ".csproj"))
+                return $"Unsupported file type '{ext}'. Expected .sln, .slnx, or .csproj";
+
+            await _lsp.LoadSolutionAsync(path, ct);
+            return $"Loaded {Path.GetFileName(path)}. Solution is loading in the background - first requests may be slow.";
+        }
+        catch (Exception ex) { return FormatError(ex); }
+    }
+
+    private string? RequireSolution()
+    {
+        if (!_lsp.IsSolutionLoaded)
+            return "No solution loaded. Call load_solution first.";
+        return null;
+    }
+
     [McpServerTool(Name = "find_definition"), Description("Find the definition of a symbol by name in a file.")]
     public async Task<string> FindDefinition(
         [Description("Absolute path to the C# file")] string filePath,
@@ -22,6 +49,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
             if (pos is null)
                 return $"Symbol '{symbolName}' not found in {filePath}";
@@ -37,10 +66,7 @@ public class LspTools
 
             return FormatLocations(result, "definition");
         }
-        catch (OperationCanceledException)
-        {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
-        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
     [McpServerTool(Name = "find_references"), Description("Find all references to a symbol across the workspace.")]
@@ -53,6 +79,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
             if (pos is null)
                 return $"Symbol '{symbolName}' not found in {filePath}";
@@ -69,10 +97,7 @@ public class LspTools
 
             return FormatLocations(result, "reference");
         }
-        catch (OperationCanceledException)
-        {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
-        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
     [McpServerTool(Name = "get_hover"), Description("Get hover documentation and type info for a symbol.")]
@@ -84,6 +109,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
             if (pos is null)
                 return $"Symbol '{symbolName}' not found in {filePath}";
@@ -122,10 +149,7 @@ public class LspTools
 
             return contents.ToString();
         }
-        catch (OperationCanceledException)
-        {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
-        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
     [McpServerTool(Name = "find_document_symbols"), Description("List all symbols defined in a C# file.")]
@@ -135,6 +159,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             await _lsp.EnsureDocumentOpenAsync(filePath, ct);
             var uri = LspClient.PathToUri(filePath);
 
@@ -150,10 +176,7 @@ public class LspTools
             FormatSymbolTree(symbols, sb, indent: 0);
             return sb.ToString().TrimEnd();
         }
-        catch (OperationCanceledException)
-        {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
-        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
     [McpServerTool(Name = "find_workspace_symbols"), Description("Search for symbols across the entire workspace. Optionally filter results to specific directories or project paths.")]
@@ -164,6 +187,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var result = await _lsp.RequestAsync("workspace/symbol", new JObject
             {
                 ["query"] = query,
@@ -202,24 +227,18 @@ public class LspTools
 
             return sb.ToString().TrimEnd();
         }
-        catch (OperationCanceledException)
-        {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
-        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
-    [McpServerTool(Name = "restart_lsp"), Description("Restart the csharp-ls language server. Use when the server is in a bad state, returning stale results, or after solution changes.")]
+    [McpServerTool(Name = "restart_lsp"), Description("Restart the roslyn-ls language server. Use when the server is in a bad state, returning stale results, or after solution changes.")]
     public async Task<string> RestartLsp(CancellationToken ct = default)
     {
         try
         {
             await _lsp.RestartAsync(ct);
-            return "csharp-ls restarted successfully. The solution will reload in the background - first requests may be slow.";
+            return "roslyn-ls restarted successfully. The solution will reload in the background - first requests may be slow.";
         }
-        catch (Exception ex)
-        {
-            return $"Failed to restart csharp-ls: {ex.Message}";
-        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
     [McpServerTool(Name = "go_to_implementation"), Description("Find implementations of an interface or abstract method.")]
@@ -231,6 +250,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
             if (pos is null)
                 return $"Symbol '{symbolName}' not found in {filePath}";
@@ -246,10 +267,7 @@ public class LspTools
 
             return FormatLocations(result, "implementation");
         }
-        catch (OperationCanceledException)
-        {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
-        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
     [McpServerTool(Name = "go_to_type_definition"), Description("Jump to the type definition of a symbol (e.g. find the class of a variable).")]
@@ -261,6 +279,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
             if (pos is null)
                 return $"Symbol '{symbolName}' not found in {filePath}";
@@ -276,10 +296,7 @@ public class LspTools
 
             return FormatLocations(result, "type definition");
         }
-        catch (OperationCanceledException)
-        {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
-        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
     [McpServerTool(Name = "incoming_calls"), Description("Find all functions/methods that call the specified symbol.")]
@@ -291,6 +308,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
             if (pos is null)
                 return $"Symbol '{symbolName}' not found in {filePath}";
@@ -337,10 +356,7 @@ public class LspTools
 
             return sb.ToString().TrimEnd();
         }
-        catch (OperationCanceledException)
-        {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
-        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
     [McpServerTool(Name = "outgoing_calls"), Description("Find all functions/methods called by the specified symbol.")]
@@ -352,6 +368,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
             if (pos is null)
                 return $"Symbol '{symbolName}' not found in {filePath}";
@@ -398,10 +416,113 @@ public class LspTools
 
             return sb.ToString().TrimEnd();
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) { return FormatError(ex); }
+    }
+
+    [McpServerTool(Name = "get_diagnostics"), Description("Get compiler errors and warnings for a C# file without building.")]
+    public async Task<string> GetDiagnostics(
+        [Description("Absolute path to the C# file")] string filePath,
+        [Description("Minimum severity to include: error, warning, info, hint. Default: warning")] string? minSeverity = null,
+        CancellationToken ct = default)
+    {
+        try
         {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
+            if (RequireSolution() is string err) return err;
+
+            await _lsp.EnsureDocumentOpenAsync(filePath, ct);
+            var uri = LspClient.PathToUri(filePath);
+
+            var result = await _lsp.RequestAsync("textDocument/diagnostic", new JObject
+            {
+                ["textDocument"] = new JObject { ["uri"] = uri },
+            }, ct);
+
+            var items = result?["items"] as JArray;
+            if (items is null || items.Count == 0)
+                return $"No diagnostics found in {Path.GetFileName(filePath)}.";
+
+            var minSev = (minSeverity?.ToLowerInvariant()) switch
+            {
+                "error" => 1,
+                "warning" or null => 2,
+                "info" or "information" => 3,
+                "hint" => 4,
+                _ => 2,
+            };
+
+            var sb = new StringBuilder();
+            var count = 0;
+
+            foreach (var diag in items)
+            {
+                var severity = diag["severity"]?.Value<int>() ?? 4;
+                if (severity > minSev) continue;
+
+                var sevLabel = severity switch { 1 => "Error", 2 => "Warning", 3 => "Info", _ => "Hint" };
+                var line = (diag["range"]?["start"]?["line"]?.Value<int>() ?? 0) + 1;
+                var code = diag["code"]?.ToString() ?? "";
+                var message = diag["message"]?.ToString() ?? "";
+                var source = diag["source"]?.ToString();
+
+                sb.Append($"  [{sevLabel}] {Path.GetFileName(filePath)}:{line}");
+                if (code.Length > 0) sb.Append($" {code}");
+                sb.AppendLine($": {message}");
+                count++;
+            }
+
+            if (count == 0)
+                return $"No diagnostics at severity '{minSeverity ?? "warning"}' or above in {Path.GetFileName(filePath)}.";
+
+            sb.Insert(0, $"Found {count} diagnostic(s) in {Path.GetFileName(filePath)}:\n\n");
+            return sb.ToString().TrimEnd();
         }
+        catch (Exception ex) { return FormatError(ex); }
+    }
+
+    [McpServerTool(Name = "rename_symbol"), Description("Rename a symbol across the workspace. Returns a preview of all changes that would be made.")]
+    public async Task<string> RenameSymbol(
+        [Description("Absolute path to the C# file")] string filePath,
+        [Description("Name of the symbol to rename")] string symbolName,
+        [Description("New name for the symbol")] string newName,
+        [Description("Kind of symbol: class, method, property, field, interface, enum, struct, etc.")] string? symbolKind = null,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (RequireSolution() is string err) return err;
+
+            var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
+            if (pos is null)
+                return $"Symbol '{symbolName}' not found in {filePath}";
+
+            await _lsp.EnsureDocumentOpenAsync(filePath, ct);
+            var uri = LspClient.PathToUri(filePath);
+
+            // Check if rename is valid
+            var prepareResult = await _lsp.RequestAsync("textDocument/prepareRename", new JObject
+            {
+                ["textDocument"] = new JObject { ["uri"] = uri },
+                ["position"] = new JObject { ["line"] = pos.Value.line, ["character"] = pos.Value.character },
+            }, ct);
+
+            if (prepareResult is null)
+                return $"Symbol '{symbolName}' cannot be renamed.";
+
+            var result = await _lsp.RequestAsync("textDocument/rename", new JObject
+            {
+                ["textDocument"] = new JObject { ["uri"] = uri },
+                ["position"] = new JObject { ["line"] = pos.Value.line, ["character"] = pos.Value.character },
+                ["newName"] = newName,
+            }, ct);
+
+            if (result is null)
+                return $"Rename failed - no changes returned.";
+
+            var applied = await ApplyWorkspaceEditAsync(result, ct);
+            var summary = FormatWorkspaceEdit(result, symbolName, newName);
+            return applied ? summary : $"(dry-run, edits NOT applied to disk)\n\n{summary}";
+        }
+        catch (Exception ex) { return FormatError(ex); }
     }
 
     [McpServerTool(Name = "supertypes"), Description("Find base types and interfaces of a type (type hierarchy - supertypes).")]
@@ -413,6 +534,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
             if (pos is null)
                 return $"Symbol '{symbolName}' not found in {filePath}";
@@ -420,34 +543,84 @@ public class LspTools
             await _lsp.EnsureDocumentOpenAsync(filePath, ct);
             var uri = LspClient.PathToUri(filePath);
 
-            var prepareResult = await _lsp.RequestAsync("textDocument/prepareTypeHierarchy", new JObject
+            try
             {
-                ["textDocument"] = new JObject { ["uri"] = uri },
-                ["position"] = new JObject { ["line"] = pos.Value.line, ["character"] = pos.Value.character },
-            }, ct);
+                var prepareResult = await _lsp.RequestAsync("textDocument/prepareTypeHierarchy", new JObject
+                {
+                    ["textDocument"] = new JObject { ["uri"] = uri },
+                    ["position"] = new JObject { ["line"] = pos.Value.line, ["character"] = pos.Value.character },
+                }, ct);
 
-            if (prepareResult is not JArray items || items.Count == 0)
-                return $"No type hierarchy item found for '{symbolName}'.";
+                if (prepareResult is JArray items && items.Count > 0)
+                {
+                    var item = items[0];
+                    var result = await _lsp.RequestAsync("typeHierarchy/supertypes", new JObject
+                    {
+                        ["item"] = item,
+                    }, ct);
 
-            var item = items[0];
-            var result = await _lsp.RequestAsync("typeHierarchy/supertypes", new JObject
-            {
-                ["item"] = item,
-            }, ct);
+                    if (result is JArray types && types.Count > 0)
+                    {
+                        var sb = new StringBuilder();
+                        sb.AppendLine($"Supertypes of '{symbolName}':");
+                        sb.AppendLine();
+                        FormatTypeHierarchyItems(types, sb);
+                        return sb.ToString().TrimEnd();
+                    }
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { /* native LSP failed, use fallback */ }
 
-            if (result is not JArray types || types.Count == 0)
-                return $"No supertypes found for '{symbolName}'.";
-
-            var sb = new StringBuilder();
-            sb.AppendLine($"Supertypes of '{symbolName}':");
-            sb.AppendLine();
-            FormatTypeHierarchyItems(types, sb);
-            return sb.ToString().TrimEnd();
+            return await SupertypesFallback(filePath, symbolName, pos.Value.line, ct);
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) { return FormatError(ex); }
+    }
+
+    private async Task<string> SupertypesFallback(string filePath, string symbolName, int line, CancellationToken ct)
+    {
+        var lines = await File.ReadAllLinesAsync(filePath, ct);
+        if (line >= lines.Length)
+            return $"No supertypes found for '{symbolName}'.";
+
+        var declLine = lines[line].Trim();
+
+        // Parse "class Foo : Bar, IBaz" or "struct Foo : IBar"
+        var colonIdx = declLine.IndexOf(':');
+        if (colonIdx < 0)
+            return $"No supertypes found for '{symbolName}' (no base type in declaration).";
+
+        var afterColon = declLine[(colonIdx + 1)..].Trim();
+        // Strip trailing { or where constraints
+        var braceIdx = afterColon.IndexOf('{');
+        if (braceIdx >= 0) afterColon = afterColon[..braceIdx];
+        var whereIdx = afterColon.IndexOf(" where ", StringComparison.Ordinal);
+        if (whereIdx >= 0) afterColon = afterColon[..whereIdx];
+
+        var baseTypes = afterColon
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(t => t.Split('<')[0].Trim()) // strip generic args for lookup
+            .Where(t => t.Length > 0)
+            .ToList();
+
+        if (baseTypes.Count == 0)
+            return $"No supertypes found for '{symbolName}'.";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Supertypes of '{symbolName}':");
+        sb.AppendLine();
+
+        foreach (var baseType in baseTypes)
         {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
+            var resolved = await ResolveTypeLocation(baseType, ct, filePath);
+
+            if (resolved is not null)
+                sb.AppendLine($"  {baseType} ({resolved.Value.kind}) - {resolved.Value.path}:{resolved.Value.line + 1}");
+            else
+                sb.AppendLine($"  {baseType} (external/unresolved)");
         }
+
+        return sb.ToString().TrimEnd();
     }
 
     [McpServerTool(Name = "subtypes"), Description("Find derived types and implementations of a type (type hierarchy - subtypes).")]
@@ -459,6 +632,8 @@ public class LspTools
     {
         try
         {
+            if (RequireSolution() is string err) return err;
+
             var pos = await _lsp.FindSymbolPositionAsync(filePath, symbolName, symbolKind, ct);
             if (pos is null)
                 return $"Symbol '{symbolName}' not found in {filePath}";
@@ -466,34 +641,399 @@ public class LspTools
             await _lsp.EnsureDocumentOpenAsync(filePath, ct);
             var uri = LspClient.PathToUri(filePath);
 
-            var prepareResult = await _lsp.RequestAsync("textDocument/prepareTypeHierarchy", new JObject
+            try
             {
-                ["textDocument"] = new JObject { ["uri"] = uri },
-                ["position"] = new JObject { ["line"] = pos.Value.line, ["character"] = pos.Value.character },
-            }, ct);
+                var prepareResult = await _lsp.RequestAsync("textDocument/prepareTypeHierarchy", new JObject
+                {
+                    ["textDocument"] = new JObject { ["uri"] = uri },
+                    ["position"] = new JObject { ["line"] = pos.Value.line, ["character"] = pos.Value.character },
+                }, ct);
 
-            if (prepareResult is not JArray items || items.Count == 0)
-                return $"No type hierarchy item found for '{symbolName}'.";
+                if (prepareResult is JArray items && items.Count > 0)
+                {
+                    var item = items[0];
+                    var result = await _lsp.RequestAsync("typeHierarchy/subtypes", new JObject
+                    {
+                        ["item"] = item,
+                    }, ct);
 
-            var item = items[0];
-            var result = await _lsp.RequestAsync("typeHierarchy/subtypes", new JObject
+                    if (result is JArray types && types.Count > 0)
+                    {
+                        var sb = new StringBuilder();
+                        sb.AppendLine($"Subtypes of '{symbolName}':");
+                        sb.AppendLine();
+                        FormatTypeHierarchyItems(types, sb);
+                        return sb.ToString().TrimEnd();
+                    }
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch { /* native LSP failed, use fallback */ }
+
+            return await SubtypesFallback(filePath, symbolName, ct);
+        }
+        catch (Exception ex) { return FormatError(ex); }
+    }
+
+    private async Task<string> SubtypesFallback(string filePath, string symbolName, CancellationToken ct)
+    {
+        // Search the same file for classes/structs inheriting from symbolName
+        var lines = await File.ReadAllLinesAsync(filePath, ct);
+        var pattern = $": {symbolName}";
+        var commaPattern = $", {symbolName}";
+
+        var sb = new StringBuilder();
+        var count = 0;
+
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            if (!line.Contains(pattern, StringComparison.Ordinal) &&
+                !line.Contains(commaPattern, StringComparison.Ordinal))
+                continue;
+
+            var trimmed = line.Trim();
+            // Match class/struct/record/interface declarations
+            var match = System.Text.RegularExpressions.Regex.Match(
+                trimmed, @"(?:class|struct|record|interface)\s+(\w+)");
+            if (!match.Success) continue;
+
+            var typeName = match.Groups[1].Value;
+            if (typeName == symbolName) continue; // skip self
+
+            sb.AppendLine($"  {typeName} (Class) - {filePath}:{i + 1}");
+            count++;
+        }
+
+        if (count == 0)
+            return $"No subtypes found for '{symbolName}'.";
+
+        sb.Insert(0, $"Subtypes of '{symbolName}':\n\n");
+        return sb.ToString().TrimEnd();
+    }
+
+    [McpServerTool(Name = "type_hierarchy"), Description("Show full inheritance chain from a type up to its root base type.")]
+    public async Task<string> TypeHierarchy(
+        [Description("Absolute path to the C# file")] string filePath,
+        [Description("Name of the type")] string symbolName,
+        [Description("Kind of symbol: class, interface, struct, enum")] string? symbolKind = null,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (RequireSolution() is string err) return err;
+
+            var chain = new List<(string name, string kind, string path, int line)>();
+            var currentFile = filePath;
+            var currentName = symbolName;
+            var visited = new HashSet<string>(StringComparer.Ordinal);
+
+            // Find starting symbol position
+            var pos = await _lsp.FindSymbolPositionAsync(currentFile, currentName, symbolKind, ct);
+            if (pos is null)
+                return $"Symbol '{symbolName}' not found in {filePath}";
+
+            chain.Add((currentName, symbolKind ?? "Class", currentFile, pos.Value.line + 1));
+            visited.Add(currentName);
+
+            // Walk up the inheritance chain
+            while (true)
             {
-                ["item"] = item,
-            }, ct);
+                ct.ThrowIfCancellationRequested();
 
-            if (result is not JArray types || types.Count == 0)
-                return $"No subtypes found for '{symbolName}'.";
+                // Read the declaration line to find base type
+                var lines = await File.ReadAllLinesAsync(currentFile, ct);
+                if (pos!.Value.line >= lines.Length) break;
 
+                var declLine = lines[pos.Value.line].Trim();
+                var colonIdx = declLine.IndexOf(':');
+                if (colonIdx < 0) break;
+
+                var afterColon = declLine[(colonIdx + 1)..].Trim();
+                var braceIdx = afterColon.IndexOf('{');
+                if (braceIdx >= 0) afterColon = afterColon[..braceIdx];
+                var whereIdx = afterColon.IndexOf(" where ", StringComparison.Ordinal);
+                if (whereIdx >= 0) afterColon = afterColon[..whereIdx];
+
+                // Take just the first type (base class, not interfaces)
+                var baseType = afterColon
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(t => t.Split('<')[0].Trim())
+                    .FirstOrDefault(t => t.Length > 0);
+
+                if (baseType is null || !visited.Add(baseType)) break;
+
+                // Locate via workspace/symbol (handle qualified names like Script.CoreUObject.Object)
+                var resolved = await ResolveTypeLocation(baseType, ct, currentFile);
+
+                if (resolved is null)
+                {
+                    chain.Add((baseType, "external", "", 0));
+                    break;
+                }
+
+                chain.Add((baseType, resolved.Value.kind, resolved.Value.path, resolved.Value.line + 1));
+                currentFile = resolved.Value.path;
+                pos = (resolved.Value.line, 0);
+            }
+
+            // Format as tree
             var sb = new StringBuilder();
-            sb.AppendLine($"Subtypes of '{symbolName}':");
+            sb.AppendLine($"Type hierarchy for '{symbolName}':");
             sb.AppendLine();
-            FormatTypeHierarchyItems(types, sb);
+            for (var i = chain.Count - 1; i >= 0; i--)
+            {
+                var (name, kind, path, line) = chain[i];
+                var indent = new string(' ', (chain.Count - 1 - i) * 2);
+                var arrow = i < chain.Count - 1 ? "-> " : "   ";
+                if (path.Length > 0)
+                    sb.AppendLine($"{indent}{arrow}{name} ({kind}) - {path}:{line}");
+                else
+                    sb.AppendLine($"{indent}{arrow}{name} ({kind})");
+            }
+
             return sb.ToString().TrimEnd();
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) { return FormatError(ex); }
+    }
+
+    /// <summary>
+    /// Resolves a type name to its source location via workspace/symbol.
+    /// For qualified names (e.g., Script.CoreUObject.Object), searches by the full qualified name
+    /// first (which pattern-matches in roslyn-ls), then falls back to the short name.
+    /// Filters results to type symbols only and disambiguates using the source file path.
+    /// </summary>
+    private async Task<(string kind, string path, int line)?> ResolveTypeLocation(
+        string typeName, CancellationToken ct, string? contextFilePath = null)
+    {
+        var isQualified = typeName.Contains('.');
+        var shortName = isQualified ? typeName[(typeName.LastIndexOf('.') + 1)..] : typeName;
+
+        // For qualified names, search by the full name first - roslyn-ls does pattern matching
+        // so "Script.CoreUObject.Object" will find symbols in CoreUObject files
+        if (isQualified)
         {
-            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
+            var qualifiedResult = await FindTypeSymbol(typeName, shortName, ct, contextFilePath);
+            if (qualifiedResult is not null) return qualifiedResult;
         }
+
+        // Fallback: search by short name
+        return await FindTypeSymbol(shortName, shortName, ct, contextFilePath);
+    }
+
+    private async Task<(string kind, string path, int line)?> FindTypeSymbol(
+        string query, string expectedName, CancellationToken ct, string? contextFilePath)
+    {
+        var result = await _lsp.RequestAsync("workspace/symbol", new JObject
+        {
+            ["query"] = query
+        }, ct);
+
+        if (result is not JArray symbols) return null;
+
+        // Extract a project-identifying directory segment from context file path to prefer same-project matches.
+        // E.g., from "F:\MonoRepo\extraction\palia-extraction\generated\Models\Script\Palia.cs"
+        // we want "palia-extraction" so we match other files under the same extraction folder.
+        // Use the longest matching segment to avoid picking "extraction" over "palia-extraction".
+        string? contextSegment = null;
+        if (contextFilePath is not null)
+        {
+            var parts = Path.GetDirectoryName(contextFilePath)?.Split(Path.DirectorySeparatorChar) ?? [];
+            contextSegment = parts
+                .Where(p => p.Contains("extraction", StringComparison.OrdinalIgnoreCase) ||
+                            p.Contains("DatabaseBuilder", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(p => p.Length)
+                .FirstOrDefault();
+        }
+
+        (string kind, string path, int line)? sameProjectMatch = null;
+        (string kind, string path, int line)? anyMatch = null;
+
+        foreach (var sym in symbols)
+        {
+            var name = sym["name"]?.ToString();
+            if (!string.Equals(name, expectedName, StringComparison.Ordinal))
+                continue;
+
+            // Only consider type symbols (class=5, enum=10, interface=11, struct=23)
+            var symKind = sym["kind"]?.Value<int>() ?? 0;
+            if (symKind is not (5 or 10 or 11 or 23)) continue;
+
+            var kind = LspClient.SymbolKindName(symKind);
+            var loc = sym["location"];
+            var path = loc?["uri"] is JToken u ? LspClient.UriToPath(u.ToString()) : null;
+            var symLine = loc?["range"]?["start"]?["line"]?.Value<int>() ?? 0;
+
+            if (path is null) continue;
+
+            // Prefer match from same project/extraction
+            if (contextSegment is not null &&
+                path.Contains(contextSegment, StringComparison.OrdinalIgnoreCase))
+            {
+                sameProjectMatch ??= (kind, path, symLine);
+            }
+
+            anyMatch ??= (kind, path, symLine);
+        }
+
+        return sameProjectMatch ?? anyMatch;
+    }
+
+    // -- Workspace edit application --
+
+    private async Task<bool> ApplyWorkspaceEditAsync(JToken result, CancellationToken ct)
+    {
+        var fileEdits = new Dictionary<string, List<(int startLine, int startChar, int endLine, int endChar, string newText)>>();
+
+        void CollectEdits(string uri, JArray edits)
+        {
+            var path = LspClient.UriToPath(uri);
+            if (!fileEdits.TryGetValue(path, out var list))
+                fileEdits[path] = list = [];
+
+            foreach (var edit in edits)
+            {
+                var range = edit["range"];
+                if (range is null) continue;
+                list.Add((
+                    range["start"]!["line"]!.Value<int>(),
+                    range["start"]!["character"]!.Value<int>(),
+                    range["end"]!["line"]!.Value<int>(),
+                    range["end"]!["character"]!.Value<int>(),
+                    edit["newText"]?.ToString() ?? ""));
+            }
+        }
+
+        if (result["documentChanges"] is JArray docChanges)
+        {
+            foreach (var dc in docChanges)
+            {
+                var uri = dc["textDocument"]?["uri"]?.ToString();
+                if (uri is not null && dc["edits"] is JArray edits)
+                    CollectEdits(uri, edits);
+            }
+        }
+
+        if (result["changes"] is JObject changes)
+        {
+            foreach (var prop in changes.Properties())
+            {
+                if (prop.Value is JArray edits)
+                    CollectEdits(prop.Name, edits);
+            }
+        }
+
+        if (fileEdits.Count == 0) return false;
+
+        foreach (var (path, edits) in fileEdits)
+        {
+            var text = await File.ReadAllTextAsync(path, ct);
+            var lines = text.Split('\n');
+
+            // Apply edits in reverse order (bottom-up) to preserve positions
+            foreach (var (sl, sc, el, ec, newText) in edits.OrderByDescending(e => e.startLine).ThenByDescending(e => e.startChar))
+            {
+                var startOffset = GetOffset(lines, sl, sc);
+                var endOffset = GetOffset(lines, el, ec);
+                text = string.Concat(text.AsSpan(0, startOffset), newText, text.AsSpan(endOffset));
+                // Re-split after each edit since offsets shift
+                lines = text.Split('\n');
+            }
+
+            await File.WriteAllTextAsync(path, text, ct);
+
+            // Notify LSP that the file changed
+            var uri = LspClient.PathToUri(path);
+            await _lsp.NotifyAsync("textDocument/didClose", new JObject
+            {
+                ["textDocument"] = new JObject { ["uri"] = uri }
+            });
+            _lsp.MarkDocumentClosed(uri);
+        }
+
+        return true;
+    }
+
+    private static int GetOffset(string[] lines, int line, int character)
+    {
+        var offset = 0;
+        for (var i = 0; i < line && i < lines.Length; i++)
+            offset += lines[i].Length + 1; // +1 for \n
+        return offset + character;
+    }
+
+    // -- Workspace edit formatting --
+
+    private static string FormatWorkspaceEdit(JToken result, string oldName, string newName)
+    {
+        var sb = new StringBuilder();
+        var totalEdits = 0;
+        var fileCount = 0;
+
+        // Handle documentChanges (TextDocumentEdit[])
+        var docChanges = result["documentChanges"] as JArray;
+        if (docChanges is not null)
+        {
+            foreach (var docChange in docChanges)
+            {
+                var docUri = docChange["textDocument"]?["uri"]?.ToString();
+                if (docUri is null) continue;
+
+                var path = LspClient.UriToPath(docUri);
+                var edits = docChange["edits"] as JArray;
+                if (edits is null || edits.Count == 0) continue;
+
+                fileCount++;
+                sb.AppendLine($"  {path} ({edits.Count} edit(s))");
+                foreach (var edit in edits)
+                {
+                    var line = (edit["range"]?["start"]?["line"]?.Value<int>() ?? 0) + 1;
+                    sb.AppendLine($"    line {line}: '{oldName}' -> '{newName}'");
+                    totalEdits++;
+                }
+            }
+        }
+
+        // Handle changes { uri: TextEdit[] }
+        var changes = result["changes"] as JObject;
+        if (changes is not null)
+        {
+            foreach (var prop in changes.Properties())
+            {
+                var path = LspClient.UriToPath(prop.Name);
+                var edits = prop.Value as JArray;
+                if (edits is null || edits.Count == 0) continue;
+
+                fileCount++;
+                sb.AppendLine($"  {path} ({edits.Count} edit(s))");
+                foreach (var edit in edits)
+                {
+                    var line = (edit["range"]?["start"]?["line"]?.Value<int>() ?? 0) + 1;
+                    sb.AppendLine($"    line {line}: '{oldName}' -> '{newName}'");
+                    totalEdits++;
+                }
+            }
+        }
+
+        if (totalEdits == 0)
+            return $"Rename '{oldName}' -> '{newName}': no changes needed.";
+
+        sb.Insert(0, $"Rename '{oldName}' -> '{newName}': {totalEdits} edit(s) across {fileCount} file(s):\n\n");
+        return sb.ToString().TrimEnd();
+    }
+
+    // -- Error formatting --
+
+    private static string FormatError(Exception ex)
+    {
+        if (ex is OperationCanceledException)
+            return "Request timed out. The language server may still be loading the solution. Try again in a moment.";
+
+        var sb = new StringBuilder();
+        sb.AppendLine($"Error: {ex.GetType().Name}: {ex.Message}");
+        if (ex.InnerException is not null)
+            sb.AppendLine($"  Inner: {ex.InnerException.GetType().Name}: {ex.InnerException.Message}");
+        return sb.ToString().TrimEnd();
     }
 
     // -- Path filter helpers --

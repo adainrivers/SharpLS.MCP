@@ -11,10 +11,12 @@ builder.Logging.AddConsole(options =>
     options.LogToStandardErrorThreshold = LogLevel.Trace;
 });
 
+// First positional arg = solution/project path
+var solutionPath = args.FirstOrDefault(a => !a.StartsWith('-'));
+
 builder.Services.AddSingleton(new LspClientOptions
 {
-    SolutionPath = Environment.GetEnvironmentVariable("SHARPLSMCP_SOLUTION"),
-    WorkspaceRoot = Environment.GetEnvironmentVariable("SHARPLSMCP_ROOT"),
+    SolutionPath = solutionPath,
     TimeoutSeconds = int.TryParse(Environment.GetEnvironmentVariable("SHARPLSMCP_TIMEOUT"), out var t) ? t : 60,
 });
 
