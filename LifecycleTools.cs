@@ -28,6 +28,22 @@ public class LifecycleTools : ToolBase
         catch (Exception ex) { return FormatError(ex); }
     }
 
+    [McpServerTool(Name = "reload_file"), Description("Reload a single file from disk. Use when a file has been modified outside the editor and the server has stale contents. Much faster than restarting the LSP.")]
+    public async Task<string> ReloadFile(
+        [Description("Absolute path to the C# file to reload")] string filePath,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            if (!File.Exists(filePath))
+                return $"File not found: {filePath}";
+
+            await _lsp.ReloadDocumentAsync(filePath, ct);
+            return $"Reloaded {Path.GetFileName(filePath)}";
+        }
+        catch (Exception ex) { return FormatError(ex); }
+    }
+
     [McpServerTool(Name = "restart_lsp"), Description("Restart the roslyn-ls language server. Use when the server is in a bad state, returning stale results, or after solution changes.")]
     public async Task<string> RestartLsp(CancellationToken ct = default)
     {

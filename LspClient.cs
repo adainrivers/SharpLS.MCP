@@ -219,6 +219,22 @@ public class LspClient : IHostedService, IDisposable
         await _rpc!.NotifyWithParameterObjectAsync(method, @params);
     }
 
+    public async Task ReloadDocumentAsync(string filePath, CancellationToken ct = default)
+    {
+        var uri = PathToUri(filePath);
+
+        if (_openDocuments.Contains(uri))
+        {
+            await _rpc!.NotifyWithParameterObjectAsync("textDocument/didClose", new JObject
+            {
+                ["textDocument"] = new JObject { ["uri"] = uri }
+            });
+            _openDocuments.Remove(uri);
+        }
+
+        await EnsureDocumentOpenAsync(filePath, ct);
+    }
+
     public void MarkDocumentClosed(string uri)
     {
         _openDocuments.Remove(uri);
